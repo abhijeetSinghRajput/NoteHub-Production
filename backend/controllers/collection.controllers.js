@@ -175,6 +175,7 @@ const getCollectionsAggregatePipeline = (
   requester = null,
   slug = null,
   includeNoteCollaborators = false,
+  minimal = false, 
 ) => {
   const requestingUserId = requester?._id;
   const requestingUserIdStr = requestingUserId
@@ -193,18 +194,20 @@ const getCollectionsAggregatePipeline = (
     ? new mongoose.Types.ObjectId(requestingUserIdStr)
     : null;
 
-  // Base note projection
-  const noteProjection = {
-    _id: 1,
-    name: 1,
-    slug: 1,
-    visibility: 1,
-    createdAt: 1,
-    updatedAt: 1,
-    seo: 1,
-  };
+  // Base note projection — slim if minimal
+  const noteProjection = minimal
+    ? { _id: 1, name: 1, slug: 1, visibility: 1 }
+    : {
+        _id: 1,
+        name: 1,
+        slug: 1,
+        visibility: 1,
+        createdAt: 1,
+        updatedAt: 1,
+        seo: 1,
+      };
 
-  if (includeNoteCollaborators) {
+  if (!minimal && includeNoteCollaborators) {
     noteProjection.collaborators = 1;
   }
 
@@ -229,30 +232,34 @@ const getCollectionsAggregatePipeline = (
         ],
       },
     },
-    {
-      $lookup: {
-        from: "users",
-        localField: "collaborators",
-        foreignField: "_id",
-        as: "collaborators",
-        pipeline: [
+    ...(minimal
+      ? []
+      : [
           {
-            $project: {
-              _id: 1,
-              role: 1,
-              fullName: 1,
-              userName: 1,
-              avatar: 1,
-              email: 1,
+            $lookup: {
+              from: "users",
+              localField: "collaborators",
+              foreignField: "_id",
+              as: "collaborators",
+              pipeline: [
+                {
+                  $project: {
+                    _id: 1,
+                    role: 1,
+                    fullName: 1,
+                    userName: 1,
+                    avatar: 1,
+                    email: 1,
+                  },
+                },
+              ],
             },
           },
-        ],
-      },
-    },
+        ]),
     {
       $lookup: {
         from: "notes",
-        let: { collectionId: "$_id" }, // ✅ defining collectionId here
+        let: { collectionId: "$_id" },
         pipeline: [
           {
             $match: {
@@ -264,11 +271,7 @@ const getCollectionsAggregatePipeline = (
                       { $eq: ["$visibility", "public"] },
                       ...(hasFullAccess ? [{ $eq: [true, true] }] : []),
                       ...(isCollaborator
-                        ? [
-                            {
-                              $in: [requestingUserIdObj, "$collaborators"], // ✅ checking note.collaborators
-                            },
-                          ]
+                        ? [{ $in: [requestingUserIdObj, "$collaborators"] }]
                         : []),
                     ],
                   },
@@ -276,10 +279,8 @@ const getCollectionsAggregatePipeline = (
               },
             },
           },
-          {
-            $project: noteProjection,
-          },
-          ...(includeNoteCollaborators
+          { $project: noteProjection },
+          ...(!minimal && includeNoteCollaborators
             ? [
                 {
                   $lookup: {
@@ -307,32 +308,52 @@ const getCollectionsAggregatePipeline = (
         as: "notes",
       },
     },
-    {
-      $addFields: {
-        isRequesterCollaborator: isCollaborator,
-        isOwner: isOwner,
-        isAdmin: isAdmin,
-      },
-    },
-    {
-      $project: {
-        _id: 1,
-        name: 1,
-        slug: 1,
-        visibility: 1,
-        userId: 1,
-        createdAt: 1,
-        updatedAt: 1,
-        notes: 1,
-        collaborators: {
-          $cond: {
-            if: { $or: ["$isOwner", "$isAdmin", "$isRequesterCollaborator"] },
-            then: "$collaborators",
-            else: "$$REMOVE",
+    ...(minimal
+      ? [
+          {
+            $project: {
+              _id: 1,
+              name: 1,
+              visibility: 1,
+              slug: 1,
+              notes: 1,
+            },
           },
-        },
-      },
-    },
+        ]
+      : [
+          {
+            $addFields: {
+              isRequesterCollaborator: isCollaborator,
+              isOwner: isOwner,
+              isAdmin: isAdmin,
+            },
+          },
+          {
+            $project: {
+              _id: 1,
+              name: 1,
+              slug: 1,
+              visibility: 1,
+              userId: 1,
+              createdAt: 1,
+              updatedAt: 1,
+              notes: 1,
+              collaborators: {
+                $cond: {
+                  if: {
+                    $or: [
+                      "$isOwner",
+                      "$isAdmin",
+                      "$isRequesterCollaborator",
+                    ],
+                  },
+                  then: "$collaborators",
+                  else: "$$REMOVE",
+                },
+              },
+            },
+          },
+        ]),
   ];
 };
 
@@ -348,6 +369,7 @@ export const getAllCollections = async (req, res) => {
       userId,
       req.user,
       null,
+      false,
       true,
     );
     const collections = await Collection.aggregate(pipeline);
